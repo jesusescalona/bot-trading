@@ -9,10 +9,11 @@ api_secret = "WqKShSrhsX9B6MAaavkouXqcZenhjq38wJG4dEGe0zOMLP7VpdoMMussyhPYWTAC"
 
 client = Client(api_key, api_secret)
 
-start_str = "1 Mar, 2024"
+start_str = "1 Jan, 2024"
 start_ts = int(dt.datetime.strptime(start_str, "%d %b, %Y").timestamp() * 1000)
 
-usdt_pairs=['ETHUSDT']
+#usdt_pairs=['ETHUSDT']
+usdt_pairs=['BTCUSDT']
 
 for pair in usdt_pairs:
     print(f"Descargando datos históricos para {pair}")

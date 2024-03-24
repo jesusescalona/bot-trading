@@ -65,6 +65,8 @@ class DCAStrategy(bt.Strategy):
 cerebro = bt.Cerebro()
 cerebro.addstrategy(DCAStrategy)
 data = bt.feeds.GenericCSVData(
+    # ESTE PARAMETRO DEBE COINCIDIR CON EL NOMBRE DEL ARCHIVO QUE SE GENERE EN EL PASO 1 O Carpeta 1.py
+    #dataname='ETHUSDT_data.csv',
     dataname='BTCUSDT_data.csv',
     nullvalue=0.0,
     dtformat=('%Y-%m-%d %H:%M:%S'),  # Asegúrate de que este formato coincida con tu archivo CSV
