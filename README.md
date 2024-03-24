@@ -18,6 +18,8 @@ ESTA ES LA SEÑAL QUE SE SETEO CORRECTAMENTE LA CONFIGURACIÓN DEL AMBIENTE AL P
 12) INSTALO LAS DEPENDENCIAS O LIBRERIAS CON: 
 pip install nombre_dependencias_librerias (Para Python 2)
 pip3 install nombre_dependencias_librerias (Para Python de la versión 3 en adelante)
+ESTE ES EL COMANDO PARA INSTALARLAS TODAS:
+pip3 install pandas pyhthon-binance backtrader Matplotlib
 13) EL NOMBRE DE LA VARIABLE dataname ubicada en el script 2 llamado "Carpeta 2.py"
 DEBE SER IGUAL AL NOMBRE DEL ARCHIVO QUE SE GENERA EN EL script 1 llamado "Carpeta 1.py"
 14) CORRO EL ARCHIVO CON EL ICONO QUE DEBE APARECER EN LA PARTE SUPERIOR DERECHA EN VS CODE.
