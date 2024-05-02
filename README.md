@@ -15,3 +15,10 @@ ESTO ACTIVARA EL ENVIROMENT PARA PODER INSTALAR LAS LIBRERIAS, DE LO CONTRARIO N
 pip install nombre_dependencias_librerias (Para Python 2)
 pip3 install nombre_dependencias_librerias (Para Python de la versión 3 en adelante)
 10) CORRO EL ARCHIVO CON EL ICONO QUE DEBE APARECER EN LA PARTE SUPERIOR DERECHA EN VS CODE.
+
+## PARA BOT TRADING SEGUIR ESTA GUIA
+
+https://github.com/TA-Lib/ta-lib-python
+pip install --upgrade setuptools
+pip install kucoin-python
+pip install TA-Lib
