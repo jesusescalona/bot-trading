@@ -1,0 +1,100 @@
+// INCORPORA BMSB MAS MEDIA MOVIL DE 8 DE 200 Y APERTURA DE OPERACIONES
+
+//@version=5
+strategy("BMSB Strategy - Improved", overlay=true)
+
+// Definir los indicadores
+source = close
+smaLength = 20
+emaLength = 21
+
+sma = ta.sma(source, smaLength)
+ema = ta.ema(source, emaLength)
+
+// Definir las condiciones de compra y venta
+buy_signal = ta.crossover(close, sma) and ta.crossover(close, ema)
+sell_signal = ta.crossunder(close, sma) and ta.crossunder(close, ema)
+
+// Bandera para rastrear si hay una operación abierta de compra
+var bool buy_open = false
+
+// Bandera para rastrear si hay una operación abierta de venta
+var bool sell_open = false
+
+// Estrategia de compra
+if (buy_signal)
+    // Si hay una operación abierta de venta, ciérrela y abre una nueva operación de compra
+    if (sell_open)
+        strategy.close("Sell")
+        strategy.entry("Buy", strategy.long)
+        sell_open := false 
+        buy_open := true
+    // Si no hay una operación abierta de venta, abre una nueva operación de compra
+    else 
+        strategy.entry("Buy", strategy.long)
+        buy_open := true
+
+// Estrategia de venta
+if (sell_signal)
+    // Si hay una operación abierta de compra, ciérrela y abre una nueva operación de venta
+    if (buy_open)
+        strategy.close("Buy")
+        strategy.entry("Sell", strategy.short)
+        buy_open := false 
+        sell_open := true
+    // Si no hay una operación abierta de compra, abre una nueva operación de venta
+    else 
+        strategy.entry("Sell", strategy.short)
+        sell_open := true
+
+outSma = request.security(syminfo.tickerid, timeframe.period, sma)
+outEma = request.security(syminfo.tickerid, timeframe.period, ema)
+
+smaPlot = plot(outSma, color=color.new(color.red, 0), title='20w SMA')
+emaPlot = plot(outEma, color=color.new(color.green, 0), title='21w EMA')
+
+fill(smaPlot, emaPlot, color=color.new(color.orange, 75), fillgaps=true)
+
+// MEDIAS MOVILES
+len8 = input.int(9, minval=1, title="Length")
+len200 = input.int(9, minval=1, title="Length")
+src8 = input(close, title="Source")
+src200 = input(close, title="Source")
+offset8 = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.data_window)
+offset200 = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.data_window)
+out8 = ta.ema(src8, len8)
+out200 = ta.ema(src200, len200)
+plot(out8, title="EMA-8", color=color.white, offset=offset8)
+plot(out200, title="EMA-200", color=color.blue, offset=offset200)
+
+ma(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+typeMA8 = input.string(title = "Method", defval = "SMA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing", display = display.data_window)
+typeMA200 = input.string(title = "Method", defval = "SMA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing", display = display.data_window)
+
+// MEDIA MOVIL DE 8 PERIODOS
+smoothingLength8 = input.int(title = "Length", defval = 5, minval = 1, maxval = 100, group="Smoothing", display = display.data_window)
+// MEDIA MOVIL DE 200 PERIODOS
+smoothingLength200 = input.int(title = "Length", defval = 5, minval = 1, maxval = 100, group="Smoothing", display = display.data_window)
+
+// MEDIA MOVIL DE 8 PERIODOS
+smoothingLine8 = ma(out8, smoothingLength8, typeMA8)
+// MEDIA MOVIL DE 200 PERIODOS
+smoothingLine200 = ma(out200, smoothingLength200, typeMA200)
+
+// MEDIA MOVIL DE 8 PERIODOS
+plot(smoothingLine8, title="Smoothing Line", color=#f37f20, offset=offset8, display=display.none)
+// MEDIA MOVIL DE 200 PERIODOS
+plot(smoothingLine200, title="Smoothing Line", color=#f37f20, offset=offset200, display=display.none)
+
+
+// MEDIA MOVIL DE 8 PERIODOS
+plot(smoothingLine8, title="Smoothing Line", color=#f37f20, offset=offset8, display=display.none)
+// MEDIA MOVIL DE 200 PERIODOS
+plot(smoothingLine200, title="Smoothing Line", color=#f37f20, offset=offset200, display=display.none)
