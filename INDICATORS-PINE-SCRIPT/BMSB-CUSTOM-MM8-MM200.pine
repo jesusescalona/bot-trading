@@ -1,0 +1,63 @@
+// BMSB CUSTON CON MEDIAS MOVILES DE 8 Y 200 PERIODOS
+
+//@version=5
+indicator('BMSB - IND. CUSTOM', overlay=true, timeframe='W', timeframe_gaps=true)
+
+source = close
+smaLength = 20
+emaLength = 21
+
+sma = ta.sma(source, smaLength)
+ema = ta.ema(source, emaLength)
+
+outSma = request.security(syminfo.tickerid, timeframe.period, sma)
+outEma = request.security(syminfo.tickerid, timeframe.period, ema)
+
+smaPlot = plot(outSma, color=color.new(color.red, 0), title='20w SMA')
+emaPlot = plot(outEma, color=color.new(color.green, 0), title='21w EMA')
+
+fill(smaPlot, emaPlot, color=color.new(color.orange, 75), fillgaps=true)
+
+// MEDIAS MOVILES
+len8 = input.int(9, minval=1, title="Length")
+len200 = input.int(9, minval=1, title="Length")
+src8 = input(close, title="Source")
+src200 = input(close, title="Source")
+offset8 = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.data_window)
+offset200 = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.data_window)
+out8 = ta.ema(src8, len8)
+out200 = ta.ema(src200, len200)
+plot(out8, title="EMA-8", color=color.white, offset=offset8)
+plot(out200, title="EMA-200", color=color.blue, offset=offset200)
+
+ma(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+typeMA8 = input.string(title = "Method", defval = "SMA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing", display = display.data_window)
+typeMA200 = input.string(title = "Method", defval = "SMA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing", display = display.data_window)
+
+// MEDIA MOVIL DE 8 PERIODOS
+smoothingLength8 = input.int(title = "Length", defval = 5, minval = 1, maxval = 100, group="Smoothing", display = display.data_window)
+// MEDIA MOVIL DE 200 PERIODOS
+smoothingLength200 = input.int(title = "Length", defval = 5, minval = 1, maxval = 100, group="Smoothing", display = display.data_window)
+
+// MEDIA MOVIL DE 8 PERIODOS
+smoothingLine8 = ma(out8, smoothingLength8, typeMA8)
+// MEDIA MOVIL DE 200 PERIODOS
+smoothingLine200 = ma(out200, smoothingLength200, typeMA200)
+
+// MEDIA MOVIL DE 8 PERIODOS
+plot(smoothingLine8, title="Smoothing Line", color=#f37f20, offset=offset8, display=display.none)
+// MEDIA MOVIL DE 200 PERIODOS
+plot(smoothingLine200, title="Smoothing Line", color=#f37f20, offset=offset200, display=display.none)
+
+
+// MEDIA MOVIL DE 8 PERIODOS
+plot(smoothingLine8, title="Smoothing Line", color=#f37f20, offset=offset8, display=display.none)
+// MEDIA MOVIL DE 200 PERIODOS
+plot(smoothingLine200, title="Smoothing Line", color=#f37f20, offset=offset200, display=display.none)

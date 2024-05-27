@@ -1,0 +1,32 @@
+// INDICADOR DE SESIONES
+
+study(title="Forex trading sessions", overlay=true)
+
+// Inputs
+nySession   = input(title="New York session", type=session, defval="0800-1700")
+showNy      = input(title="Display New York session?", type=bool, defval=true)
+lonSession  = input(title="London session", type=session, defval="0300-1200")
+showLon     = input(title="Display London session?", type=bool, defval=true)
+tokSession  = input(title="Tokyo session", type=session, defval="1800-0300")
+showTok     = input(title="Display Tokyo session?", type=bool, defval=true)
+sydSession  = input(title="Sydney session", type=session, defval="1600-0100")
+showSyd     = input(title="Display Sydney session?", type=bool, defval=true)
+
+// Constants for colours
+nyColour  = #4169E1             // royal blue
+lonColour = #FF6347             // tomato
+tokColour = #CD853F             // peru
+sydColour = #3CB371             // medium sea green
+
+// InSession() determines if a price bar falls inside the specified session
+InSession(sess) => na(time(period, sess)) == false
+
+// Colour the background of each session
+bgcolor(color=InSession(nySession)[1] and showNy ? nyColour : na,
+     title="New York", transp=85)
+bgcolor(color=InSession(lonSession)[1] and showLon ? lonColour : na,
+     title="London", transp=85)
+bgcolor(color=InSession(tokSession)[1] and showTok ? tokColour : na,
+     title="Tokyo", transp=85)
+bgcolor(color=InSession(sydSession)[1] and showSyd ? sydColour : na,
+     title="Sydney", transp=85)

@@ -1,0 +1,77 @@
+// ESTRATEGIA HEIKEN ASHI COMBINADA CON EL DMI
+// ‼️‼️ ESTRATEGIA CON VELAS HEIKEN ASHI ‼️‼️
+ 
+//🔰PARA USAR VELAS HEIKEN ASHI
+//✅ AGREGO 2 EMAS, 1 EMA DE 10 Y UNA EMA DE 30
+//✅ EVALUA EL OPEN Y EL CLOSE DE CADA VELA PARA DETERMINAR SI ESTA ES ALCISTA O BAJISTA
+//✅ CUANDO LA EMA DE 30 TOQUE O CRUCE LA EMA DE 10 Y SE FORME 1 VELA ALCISTA = ABRIR EN LARGO
+//✅ CUANDO LA EMA DE 10 TOQUE O CRUCE LA EMA DE 30 Y SE FORME 1 VELA BAJISTA = ABRIR EN CORTO
+//✅ UNA VELA DE INDECISIÓN O DE DESACELERACION SEGUIDA DE UNA VELA ALCISTA = ABRIR POSICIÓN EN LARGO
+//✅ UNA VELA DE INDECISION O DE DESACELRACION  SEGUIDA DE UNA VELA BAJISTA = ABRIR POSICION EN CORTO
+// ‼️‼️ IMPORTANTE ‼️‼️
+// PARA USAR VELAS HEIKEN ASHI
+// ✅ AGREGO 2 EMAS, 1 EMA DE 10 Y UNA EMA DE 30
+// ✅ ABRO EN LARGO CUANDO LA EMA DE 30 CRUCE LA EMA DE 10 Y DETECTE 2 VELAS ALCISTAS SEGUIDAS QUE NO TOQUEN LA EMA DE 30
+// ✅ ABRO EN CORTO CUANDO LA EMA DE 10 CRUCE LA EMA DE 30 Y DETECTE 2 VELAS BAJISTAS SEGUIDAS QUE NO TOQUEN LA EMA DE 10
+
+//@version=4
+strategy("Estrategia combinada DMI y Heiken Ashi", overlay=true)
+
+// Calcular velas Heiken Ashi
+ha_close = (open + high + low + close) / 4
+var float ha_open = na
+var color ha_color = na
+if (na(ha_open))
+    ha_open := (open + close) / 2
+else
+    ha_open := (ha_open[1] + ha_close[1]) / 2
+ha_color := ha_open < ha_close ? color.green : color.red
+
+// Definir EMAs
+ema10 = ema(ha_close, 10)
+ema30 = ema(ha_close, 30)
+
+// Determinar si la vela actual es alcista o bajista
+is_bullish = change(ha_close) > 0
+is_bearish = change(ha_close) < 0
+
+// Condiciones para abrir posiciones largas y cortas basadas en DMI
+len = input(14, minval=1, title="DMI Length")
+th = input(20, title="DMI Threshold")
+adxLen = input(14, minval=1, title="ADX Length")
+adxTh = input(20, title="ADX Threshold")
+
+[DIplus, DIminus, ADX] = dmi(len, adxSmoothing=12)
+
+long_condition_dmi = crossover(DIplus, DIminus) and ADX > adxTh
+short_condition_dmi = crossunder(DIplus, DIminus) and ADX > adxTh
+
+open_long = long_condition_dmi and (close > ema10 or close > ema30)
+open_short = short_condition_dmi and (close < ema10 or close < ema30)
+
+// Estrategia de entrada larga
+if (open_long)
+    strategy.entry("Long", strategy.long)
+
+// Estrategia de entrada corta
+if (open_short)
+    strategy.entry("Short", strategy.short)
+
+// Condiciones para cerrar posiciones largas y cortas
+close_long_condition = (change(ha_close) < 0 and is_bullish) or (close[1] < open[1] and close < open)
+close_short_condition = (change(ha_close) > 0 and is_bearish) or (close[1] > open[1] and close > open)
+
+// Estrategia de salida para posiciones largas
+if (close_long_condition)
+    strategy.close("Long")
+
+// Estrategia de salida para posiciones cortas
+if (close_short_condition)
+    strategy.close("Short")
+
+// Plot de las EMAs
+plot(ema10, color=color.blue, title="EMA 10")
+plot(ema30, color=color.orange, title="EMA 30")
+
+// Plot de las velas Heiken Ashi
+plotcandle(ha_open, ha_close, ha_open, ha_close, color=ha_color, wickcolor=color.gray)
