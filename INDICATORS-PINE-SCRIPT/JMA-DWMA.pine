@@ -1,0 +1,68 @@
+// jma + dwma by multigrain
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © multigrain
+// @version=5
+
+indicator('jma + dwma by multigrain', 'jma + dwma', overlay=true)
+
+//NAME            TYPE               DEFVAL     TITLE               MIN     MAX         GROUP       
+longs           = input.bool        (true,      'Enable longs?')
+shorts          = input.bool        (false,     'Enable shorts?')
+
+jmaSrc          = input.source      (close,     'JMA Source',                           group='JMA')
+jmaLen          = input.int         (7,         'JMA Length',       0,      100,        group='JMA')
+jmaPhs          = input.int         (50,        'JMA Phase',        -100,   100,        group='JMA')
+jmaPwr          = input.float       (1,         'JMA Power',        0.1,                group='JMA')
+
+dwmaSrc         = input.source      (close,     'DWMA Source',                          group='DWMA')
+dwmaLen         = input.int         (10,        'DWMA Length',      1,      100,        group='DWMA')
+
+// Jurik Moving Average
+f_jma(_src, _length, _phase, _power) =>
+    phaseRatio  = _phase < -100 ? 0.5 : _phase > 100 ? 2.5 : _phase / 100 + 1.5
+    beta        = 0.45 * (_length - 1) / (0.45 * (_length - 1) + 2)
+    alpha       = math.pow(beta, _power)
+    jma         = 0.0
+    e0          = 0.0
+    e0          := (1 - alpha) * _src + alpha * nz(e0[1])
+    e1          = 0.0
+    e1          := (_src - e0) * (1 - beta) + beta * nz(e1[1])
+    e2          = 0.0
+    e2          := (e0 + phaseRatio * e1 - nz(jma[1])) * math.pow(1 - alpha, 2) + math.pow(alpha, 2) * nz(e2[1])
+    jma         := e2 + nz(jma[1])
+    jma
+
+// Double Weighted Moving Average
+f_dwma(_src, _length) =>
+    ta.wma(ta.wma(_src, _length), _length)
+
+
+// Calculations
+jma             = f_jma             (jmaSrc,    jmaLen,     jmaPhs,     jmaPwr)
+dwma            = f_dwma            (dwmaSrc,   dwmaLen)
+long            = ta.crossover      (jma,       dwma) 
+long_tp         = ta.pivothigh      (jma,       1,          1)              and jma > dwma
+short_tp        = ta.pivotlow       (jma,       1,          1)              and jma < dwma
+short           = ta.crossunder     (jma,       dwma)
+
+// Colors
+green           = #0F7173 
+red             = #F05D5E 
+tan             = #D8A47F
+grey            = #939FA6
+white           = #FFFFFF
+
+// Plots
+plot            (jma,       'JMA',                  grey,                   1,                                  display=display.none)
+plot            (dwma,      'DWMA',                 tan,                    1,                                  display=display.none)
+plotshape       (longs ? long : na,                 'Long Signal',          shape.labelup,          location.belowbar,                  green,                      0,      'long',     white,      size=size.small)
+plotshape       (longs ? long_tp : na,              'Long Take Profit',     shape.labeldown,        location.abovebar,                  tan,                        0,      'tp',       white,      size=size.small)
+plotshape       (shorts ? short : na,               'Short Signal',         shape.labeldown,        location.abovebar,                  red,                        0,      'short',    white,      size=size.small)
+plotshape       (shorts ? short_tp : na,            'Short Take Profit',    shape.labelup,          location.belowbar,                  tan,                        0,      'tp',       white,      size=size.small)
+
+
+// Alerts
+alertcondition  (longs ? long : na,                 "Long",                 "Long",                 alert.freq_once_per_bar_close)
+alertcondition  (longs ? long_tp : na,              "Long Take Profit",     "Long Take Profit",     alert.freq_once_per_bar_close)
+alertcondition  (shorts ? short : na,               "Short",                "Short",                alert.freq_once_per_bar_close)
+alertcondition  (shorts ? short_tp : na,            "Short Take Profit",    "Short Take Profit",    alert.freq_once_per_bar_close)

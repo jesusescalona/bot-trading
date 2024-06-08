@@ -1,0 +1,27 @@
+/ BTC TIME ZONES
+//coder82
+//This indicator shows the typical hours in which BTC is volatile hence expected to move, times are UTC.
+//The default settings are based on the stats found at https://www.sk3w.co/heatmaps.
+//@version=4
+
+study(title="Bitcoin Time Zones v1",shorttitle="Bitcoin Time Zones v1", overlay=true)
+
+// ** Checkboxes and custom Session
+flagMonFri = input(true, title="High Volatility Zone Mon,Fri")
+flagTueWedThu = input(true, title="High Volatility Zone Tue,Wed,Thu")
+flagWeekEnd = input(true, title="High Volatility Zone Week End")
+displayAlsoOnHourly = input(true, title="Dispolay also on 1H TF")
+
+timesMonFri = input('1000-0100', type=input.session, title="MonFri UTC time [from - to]") + ':37'
+timesWeekEnd = input('1000-0100', type=input.session, title="WeekEnd UTC [from - to]") + ':12'
+timesTueWedThu = input('1000-0100', type=input.session, title="TueWedThu UTC time [frm - to]") + ':456'
+
+bgPlot1 = time(timeframe.period, timesMonFri) 
+bgPlot2 = time(timeframe.period, timesWeekEnd) 
+bgPlot3 = time(timeframe.period, timesTueWedThu)
+
+tfLimit = displayAlsoOnHourly ? 60 : 30
+
+bgcolor(flagMonFri and bgPlot1 and timeframe.multiplier <= tfLimit and timeframe.isintraday ? color.orange : na, transp=90)
+bgcolor(flagWeekEnd and bgPlot2 and timeframe.multiplier <= tfLimit and timeframe.isintraday ? color.gray : na, transp=90)
+bgcolor(flagTueWedThu and bgPlot3 and timeframe.multiplier <= tfLimit and timeframe.isintraday ? color.red : na, transp=90)
