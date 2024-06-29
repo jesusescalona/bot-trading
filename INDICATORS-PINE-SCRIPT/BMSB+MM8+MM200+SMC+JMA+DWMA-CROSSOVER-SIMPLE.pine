@@ -58,14 +58,19 @@ fill(smaPlot, emaPlot, color=color.new(color.orange, 75), fillgaps=true)
 
 // MEDIAS MOVILES
 len8 = input.int(8, minval=1, title="Length")
+len50 = input.int(50, minval=1, title="Length")
 len200 = input.int(200, minval=1, title="Length")
 src8 = input(close, title="Source")
+src50 = input(close, title="Source")
 src200 = input(close, title="Source")
 offset8 = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.data_window)
+offset50 = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.data_window)
 offset200 = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.data_window)
 out8 = ta.ema(src8, len8)
+out50 = ta.ema(src50, len50)
 out200 = ta.ema(src200, len200)
-plot(out8, title="EMA-8", color=color.white, offset=offset8)
+plot(out8, title="EMA-8", color=#FFFFFF, offset=offset8)
+plot(out50, title="EMA-50", color=#ffd000, offset=offset50)
 plot(out200, title="EMA-200", color=color.blue, offset=offset200)
 
 // Abrir posiciones en largo y corto cuando se cumplan las condiciones
