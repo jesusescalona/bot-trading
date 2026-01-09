@@ -1,0 +1,20 @@
+{
+  "symbol": "XRPUSDT",
+  "symbols": [
+    "LTCUSDT",
+    "XRPUSDT"
+  ],
+  "api_url": "https://testnet.binance.vision",
+  "timeframe": "1h",
+  "lookback": 100,
+  "rsi_period": 14,
+  "rsi_entry_long": 30,
+  "rsi_exit_long": 70,
+  "position_size_percent": 10,
+  "stop_loss_percent": 2.0,
+  "take_profit_percent": 5.0,
+  "max_open_positions": 1,
+  "db_path": "agent_XRPUSDT.db",
+  "vol_block_notify_sec": 120,
+  "poll_interval_sec": 5
+}
