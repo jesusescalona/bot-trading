@@ -9,12 +9,9 @@ import sys
 from datetime import datetime, timezone
 
 from binance.client import Client
-from binance.enums import (
-    SIDE_BUY, SIDE_SELL,
-    ORDER_TYPE_MARKET, ORDER_TYPE_LIMIT, ORDER_TYPE_STOP_MARKET,
-    TIME_IN_FORCE_GTC
-)
+from binance.enums import SIDE_BUY, SIDE_SELL, TIME_IN_FORCE_GTC
 from binance.exceptions import BinanceAPIException
+
 
 # ============================================================
 # Logging (crítico para Fly)
@@ -306,7 +303,7 @@ def place_sl_tp(side: str, entry_price: float, qty: float):
     client.futures_create_order(
         symbol=SYMBOL,
         side=sl_side,
-        type=ORDER_TYPE_STOP_MARKET,
+        type="STOP_MARKET",
         stopPrice=sl_price,
         closePosition=True,
         workingType="MARK_PRICE",
