@@ -496,7 +496,7 @@ def main():
     tf = cfg.get("trend_timeframe", "1m")
     poll_sec = float(cfg.get("poll_sec", 1))
     kl_limit = int(cfg.get("data_klines_limit", 30))
-    vol_block_notify_sec = int(cfg.get("vol_block_notify_sec", 600))
+    vol_block_notify_sec = int(cfg.get("vol_block_notify_sec", 60))
 
     if not BINANCE_KEY or not BINANCE_SECRET:
         raise RuntimeError("Faltan credenciales Binance (BINANCE_KEY/BINANCE_SECRET)")
