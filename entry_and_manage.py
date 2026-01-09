@@ -1,555 +1,610 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import json
 import time
 import math
-import signal
-import logging
 import traceback
-import sys
 from datetime import datetime, timezone
 
+import requests
 from binance.client import Client
-from binance.enums import SIDE_BUY, SIDE_SELL, TIME_IN_FORCE_GTC
 from binance.exceptions import BinanceAPIException
 
+# =========================
+# Config / State
+# =========================
+CONFIG_FILE = os.getenv("CONFIG_FILE", "config_binance.json")
+STATE_FILE = os.getenv("BOT_STATE_FILE", "bot_state.json")
 
-# ============================================================
-# Logging (crítico para Fly)
-# ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-log = logging.getLogger("bot")
+BINANCE_KEY = os.getenv("BINANCE_KEY", "").strip()
+BINANCE_SECRET = os.getenv("BINANCE_SECRET", "").strip()
 
-
-# ============================================================
-# Helpers
-# ============================================================
-def now_utc_ts() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
-
-
-def clamp(x, a, b):
-    return max(a, min(b, x))
-
-
-def safe_float(x, default=0.0):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
-def round_step(qty: float, step: float) -> float:
-    if step <= 0:
-        return qty
-    return math.floor(qty / step) * step
-
-
-def round_tick(price: float, tick: float) -> float:
-    if tick <= 0:
-        return price
-    return round(round(price / tick) * tick, 12)
-
-
-# ============================================================
-# Telegram (opcional)
-# ============================================================
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
+TG_API = f"https://api.telegram.org/bot{TG_BOT_TOKEN}" if TG_BOT_TOKEN else ""
 
+START_TS = time.time()
+
+
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {
+            "paused": False,
+            "paused_at": None,
+            "tg_offset": 0,
+            "cooldown_until": 0,
+            "last_vol_block_notify": 0,
+            "last_error_notify": 0,
+            "last_entry": None,  # {"side": "...", "price":..., "qty":..., "ts":...}
+        }
+
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+STATE = load_state()
+
+
+# =========================
+# Telegram helpers
+# =========================
 def tg_send(text: str):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
     try:
-        import urllib.parse, urllib.request
-        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-        data = urllib.parse.urlencode({
-            "chat_id": TG_CHAT_ID,
-            "text": text,
-            "disable_web_page_preview": True
-        }).encode()
-        req = urllib.request.Request(url, data=data, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as r:
-            r.read()
+        requests.post(
+            f"{TG_API}/sendMessage",
+            json={
+                "chat_id": TG_CHAT_ID,
+                "text": text,
+                "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
     except Exception:
         pass
 
 
-# ============================================================
-# Config
-# ============================================================
-CONFIG_PATH = os.getenv("CONFIG_PATH", "config_binance.json")
-if not os.path.exists(CONFIG_PATH):
-    raise RuntimeError(f"❌ No existe {CONFIG_PATH} (CONFIG_PATH={CONFIG_PATH})")
+def tg_poll_commands(client: Client, cfg: dict):
+    """
+    Poll Telegram getUpdates and process:
+    /pause, /resume, /status, /help, /close, /close yes
+    """
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
 
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    CFG = json.load(f)
-
-SYMBOL = CFG.get("symbol", "LTCUSDT")
-TESTNET = bool(CFG.get("testnet", False))
-
-LEVERAGE = int(CFG.get("leverage", 8))
-MARGIN_TYPE = str(CFG.get("margin_type", "ISOLATED")).upper()
-
-CAPITAL = float(CFG.get("capital", 50))
-CAPITAL_DYNAMIC = bool(CFG.get("capital_dynamic", False))
-CAPITAL_RESERVE_PCT = float(CFG.get("capital_reserve_pct", 0.0))
-RISK_PER_TRADE_PCT = float(CFG.get("risk_per_trade_pct", 0.0))
-
-POLL_SEC = float(CFG.get("poll_sec", 1))
-
-# Señal Order Flow
-OF_LOOKBACK = int(CFG.get("of_lookback", 3))
-OF_VOLUME_MULT = float(CFG.get("of_volume_mult", 1.3))
-OF_BODY_RATIO = float(CFG.get("of_body_ratio", 0.6))
-TREND_TF = CFG.get("trend_timeframe", "1m")
-
-# Filtro volatilidad
-VOL_FILTER_LOOKBACK = int(CFG.get("vol_filter_lookback", 10))
-VOL_FILTER_MULT = float(CFG.get("vol_filter_mult", 1.15))
-
-# ATR / SL
-ATR_TF = CFG.get("atr_tf", "1h")
-ATR_PERIOD = int(CFG.get("atr_period", 14))
-MIN_SL_DISTANCE_PCT = float(CFG.get("min_sl_distance_pct", 0.006))
-
-# TP Ladder
-TP_MIN_PROFIT_USD = float(CFG.get("tp_min_profit_usd", 2.0))
-TP_LADDER = CFG.get("tp_ladder", [4.0, 7.0, 12.0])
-TP_LADDER_PCT = CFG.get("tp_ladder_pct", [0.3, 0.3, 0.4])
-
-# Cooldown
-COOLDOWN_POST_SL_SEC = int(CFG.get("cooldown_post_sl_sec", 180))
-
-TG_HEARTBEAT_MIN = int(CFG.get("tg_heartbeat_min", 20))
-
-
-# ============================================================
-# Binance credentials
-# ============================================================
-BINANCE_KEY = os.getenv("BINANCE_KEY", "").strip()
-BINANCE_SECRET = os.getenv("BINANCE_SECRET", "").strip()
-if not BINANCE_KEY or not BINANCE_SECRET:
-    raise RuntimeError("❌ Faltan credenciales BINANCE_KEY / BINANCE_SECRET (env)")
-
-client = Client(BINANCE_KEY, BINANCE_SECRET)
-
-if TESTNET:
+    offset = int(STATE.get("tg_offset", 0))
     try:
-        client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
-        client.FUTURES_DATA_URL = "https://testnet.binancefuture.com/fapi"
-        log.info("✅ Configurado FUTURES testnet endpoint")
+        r = requests.get(
+            f"{TG_API}/getUpdates",
+            params={"timeout": 0, "offset": offset},
+            timeout=10,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            return
+
+        for upd in data.get("result", []):
+            upd_id = upd.get("update_id", 0)
+            STATE["tg_offset"] = max(STATE.get("tg_offset", 0), upd_id + 1)
+
+            msg = upd.get("message") or upd.get("edited_message")
+            if not msg:
+                continue
+
+            chat_id = str((msg.get("chat") or {}).get("id", ""))
+            if chat_id != str(TG_CHAT_ID):
+                continue  # only authorized chat
+
+            text = (msg.get("text") or "").strip()
+            if not text.startswith("/"):
+                continue
+
+            parts = text.split()
+            cmd = parts[0].lower()
+            arg = parts[1].lower() if len(parts) > 1 else ""
+
+            if cmd == "/pause":
+                if not STATE.get("paused", False):
+                    STATE["paused"] = True
+                    STATE["paused_at"] = int(time.time())
+                    save_state(STATE)
+                    tg_send("⏸️ Trading PAUSADO. No se abrirán nuevas entradas.")
+                else:
+                    tg_send("⏸️ Ya estaba pausado.")
+
+            elif cmd == "/resume":
+                if STATE.get("paused", False):
+                    STATE["paused"] = False
+                    STATE["paused_at"] = None
+                    save_state(STATE)
+                    tg_send("▶️ Trading REANUDADO. Se permiten nuevas entradas.")
+                else:
+                    tg_send("▶️ Ya estaba activo (no pausado).")
+
+            elif cmd == "/status":
+                paused = STATE.get("paused", False)
+                cd = int(STATE.get("cooldown_until", 0))
+                now = int(time.time())
+                cd_left = max(0, cd - now)
+                up = int(now - START_TS)
+
+                pos = get_position_info(client, cfg["symbol"])
+                pos_line = "sin posición"
+                if pos and abs(pos["amt"]) > 0:
+                    pos_line = f'{pos["side"]} amt={pos["amt"]} entry={pos["entry"]} uPnL={pos["upnl"]}'
+
+                tg_send(
+                    "📊 STATUS\n"
+                    f"- paused: {paused}\n"
+                    f"- cooldown_sec: {cd_left}\n"
+                    f"- symbol: {cfg['symbol']}\n"
+                    f"- pos: {pos_line}\n"
+                    f"- uptime_sec: {up}"
+                )
+
+            elif cmd == "/help":
+                tg_send(
+                    "🤖 Comandos:\n"
+                    "/pause  - Pausar nuevas entradas\n"
+                    "/resume - Reanudar trading\n"
+                    "/status - Estado\n"
+                    "/close  - Solicita cierre (requiere confirmación)\n"
+                    "/close yes - Cierra posición a MARKET\n"
+                    "/help   - Ayuda"
+                )
+
+            elif cmd == "/close":
+                if arg != "yes":
+                    tg_send("⚠️ Para cerrar, confirma con: /close yes")
+                else:
+                    # Close position at market
+                    closed = close_position_market(client, cfg["symbol"])
+                    if closed:
+                        tg_send("🧯 CLOSE ejecutado: posición cerrada a MARKET.")
+                    else:
+                        tg_send("ℹ️ CLOSE: no había posición abierta o no se pudo cerrar.")
+
+        save_state(STATE)
+
     except Exception:
-        log.warning("⚠️ No pude configurar endpoints de testnet (continuo).")
+        # Don't kill main loop
+        return
 
 
-# ============================================================
-# Exchange filters (tick/step)
-# ============================================================
-def load_symbol_filters(symbol: str):
-    info = client.futures_exchange_info()
-    for s in info.get("symbols", []):
-        if s.get("symbol") == symbol:
-            tick = 0.0
-            step = 0.0
-            min_qty = 0.0
-            for f in s.get("filters", []):
-                if f.get("filterType") == "PRICE_FILTER":
-                    tick = safe_float(f.get("tickSize"), 0.0)
-                if f.get("filterType") == "LOT_SIZE":
-                    step = safe_float(f.get("stepSize"), 0.0)
-                    min_qty = safe_float(f.get("minQty"), 0.0)
-            return tick, step, min_qty
-    raise RuntimeError(f"No encontré filtros de símbolo para {symbol}")
-
-TICK_SIZE, STEP_SIZE, MIN_QTY = load_symbol_filters(SYMBOL)
+# =========================
+# Binance helpers
+# =========================
+def now_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-# ============================================================
-# Setup Binance (FIX -4046 aquí, NO en top-level)
-# ============================================================
-def setup_futures():
-    client.ping()
-    log.info("✅ Conectado a Binance correctamente")
-
-    # Leverage
+def safe_api(call, *args, **kwargs):
     try:
-        client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
-        log.info(f"✅ Leverage seteado: {LEVERAGE}x")
-    except Exception as e:
-        log.warning(f"⚠️ No se pudo ajustar leverage (continuo): {e}")
-
-    # Margin type (FIX -4046)
-    try:
-        client.futures_change_margin_type(symbol=SYMBOL, marginType=MARGIN_TYPE)
-        log.info(f"✅ Margin type seteado: {MARGIN_TYPE}")
+        return call(*args, **kwargs)
     except BinanceAPIException as e:
-        if getattr(e, "code", None) == -4046 or "-4046" in str(e):
-            log.info(f"✅ Margin type ya estaba en {MARGIN_TYPE} (ok)")
-        else:
-            raise
+        # ignore: "No need to change margin type." (4046)
+        if getattr(e, "code", None) == -4046:
+            return None
+        raise
 
 
-# ============================================================
-# Market data
-# ============================================================
-def get_mark_price() -> float:
-    mp = client.futures_mark_price(symbol=SYMBOL)
+def get_symbol_filters(client: Client, symbol: str):
+    info = client.futures_exchange_info()
+    for s in info["symbols"]:
+        if s["symbol"] == symbol:
+            f = {x["filterType"]: x for x in s["filters"]}
+            step = float(f["LOT_SIZE"]["stepSize"])
+            min_qty = float(f["LOT_SIZE"]["minQty"])
+            tick = float(f["PRICE_FILTER"]["tickSize"])
+            return step, min_qty, tick
+    raise RuntimeError(f"No exchange info for {symbol}")
+
+
+def floor_to_step(x: float, step: float):
+    return math.floor(x / step) * step
+
+
+def round_to_tick(price: float, tick: float):
+    # round down to tick
+    return math.floor(price / tick) * tick
+
+
+def get_mark_price(client: Client, symbol: str) -> float:
+    mp = client.futures_mark_price(symbol=symbol)
     return float(mp["markPrice"])
 
-def get_klines(tf: str, limit: int):
-    return client.futures_klines(symbol=SYMBOL, interval=tf, limit=limit)
 
-def candle_stats(k):
+def get_klines(client: Client, symbol: str, tf: str, limit: int):
+    return client.futures_klines(symbol=symbol, interval=tf, limit=limit)
+
+
+def candle_metrics(k):
+    # kline array:
+    # [0 openTime,1 open,2 high,3 low,4 close,5 volume,...]
     o = float(k[1]); h = float(k[2]); l = float(k[3]); c = float(k[4]); v = float(k[5])
-    rng = max(h - l, 1e-12)
     body = abs(c - o)
+    rng = max(1e-12, (h - l))
     body_ratio = body / rng
-    return o, h, l, c, v, rng, body_ratio
+    return o, h, l, c, v, body_ratio, rng
 
-def atr(tf: str, period: int) -> float:
-    kl = get_klines(tf, limit=period + 2)
-    if len(kl) < period + 2:
-        return 0.0
-    trs = []
-    prev_close = float(kl[0][4])
-    for k in kl[1:]:
-        _, h, l, c, _, _, _ = candle_stats(k)
-        tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
-        trs.append(tr)
-        prev_close = c
-    window = trs[-period:]
-    return sum(window) / max(len(window), 1)
 
-def volatility_expansion_ok(tf: str, lookback: int, mult: float):
-    kl = get_klines(tf, limit=max(lookback + 1, 12))
-    ranges = []
-    for k in kl[-lookback-1:-1]:
-        _, h, l, _, _, rng, _ = candle_stats(k)
-        ranges.append(rng)
-    if not ranges:
+def avg(vals):
+    return sum(vals) / max(1, len(vals))
+
+
+def get_position_info(client: Client, symbol: str):
+    try:
+        acc = client.futures_account()
+        for p in acc.get("positions", []):
+            if p.get("symbol") != symbol:
+                continue
+            amt = float(p.get("positionAmt", 0))
+            entry = float(p.get("entryPrice", 0))
+            upnl = float(p.get("unRealizedProfit", 0))
+            if amt == 0:
+                return {"amt": 0.0, "entry": entry, "upnl": upnl, "side": "NONE"}
+            side = "LONG" if amt > 0 else "SHORT"
+            return {"amt": amt, "entry": entry, "upnl": upnl, "side": side}
+        return {"amt": 0.0, "entry": 0.0, "upnl": 0.0, "side": "NONE"}
+    except Exception:
+        return None
+
+
+def close_position_market(client: Client, symbol: str) -> bool:
+    pos = get_position_info(client, symbol)
+    if not pos or abs(pos["amt"]) == 0:
+        return False
+
+    amt = abs(pos["amt"])
+    side = "SELL" if pos["side"] == "LONG" else "BUY"
+
+    try:
+        client.futures_create_order(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=amt,
+            reduceOnly=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def set_leverage_and_margin(client: Client, symbol: str, leverage: int, margin_type: str):
+    safe_api(client.futures_change_leverage, symbol=symbol, leverage=leverage)
+
+    # Margin type: ISOLATED / CROSSED
+    try:
+        safe_api(client.futures_change_margin_type, symbol=symbol, marginType=margin_type)
+    except BinanceAPIException as e:
+        # -4046 ignored already by safe_api, but if not
+        if getattr(e, "code", None) == -4046:
+            return
+        raise
+
+
+# =========================
+# Strategy logic
+# =========================
+def check_volume_expansion(cfg, klines):
+    """
+    vol expansion based on range%:
+    rangePct = (high-low)/close
+    avgR over vol_lookback, lastR from last candle
+    require lastR >= avgR*vol_range_mult and avgR >= min_avg_range_pct
+    """
+    vb = int(cfg.get("vol_lookback", 14))
+    mult = float(cfg.get("vol_range_mult", 1.15))
+    min_avg = float(cfg.get("min_avg_range_pct", 0.0012))
+
+    if len(klines) < vb + 1:
         return False, 0.0, 0.0
-    avgR = sum(ranges) / len(ranges)
-    _, h, l, _, _, lastR, _ = candle_stats(kl[-1])
-    ok = lastR >= avgR * mult
+
+    ranges = []
+    for k in klines[-(vb+1):-1]:
+        _, h, l, c, _, _, _ = candle_metrics(k)
+        ranges.append((h - l) / max(1e-12, c))
+
+    avgR = avg(ranges)
+    last = klines[-1]
+    _, h, l, c, _, _, _ = candle_metrics(last)
+    lastR = (h - l) / max(1e-12, c)
+
+    ok = (avgR >= min_avg) and (lastR >= avgR * mult)
     return ok, avgR, lastR
 
 
-# ============================================================
-# Positions / Orders
-# ============================================================
-def get_position():
-    ps = client.futures_position_information(symbol=SYMBOL)
-    for p in ps:
-        amt = float(p["positionAmt"])
-        if abs(amt) > 0:
-            return p
+def signal_orderflow(cfg, klines):
+    """
+    Simple orderflow heuristic:
+    - lookback N candles for avg volume
+    - last candle volume > avg_vol * of_volume_mult
+    - last candle body_ratio >= of_body_ratio
+    - direction by candle close vs open (bull->LONG, bear->SHORT)
+    """
+    lb = int(cfg.get("of_lookback", 3))
+    v_mult = float(cfg.get("of_volume_mult", 1.3))
+    body_min = float(cfg.get("of_body_ratio", 0.6))
+
+    if len(klines) < lb + 1:
+        return None
+
+    vols = []
+    for k in klines[-(lb+1):-1]:
+        *_, v, __, ___ = candle_metrics(k)
+        vols.append(v)
+
+    avg_vol = avg(vols)
+    last = klines[-1]
+    o, h, l, c, v, body_ratio, _ = candle_metrics(last)
+
+    if avg_vol <= 0:
+        return None
+
+    if v < avg_vol * v_mult:
+        return None
+    if body_ratio < body_min:
+        return None
+
+    if c > o:
+        return "LONG"
+    elif c < o:
+        return "SHORT"
     return None
 
-def cancel_all_open_orders():
-    try:
-        client.futures_cancel_all_open_orders(symbol=SYMBOL)
-    except Exception:
-        pass
 
-def qty_from_capital(price: float) -> float:
-    if RISK_PER_TRADE_PCT and RISK_PER_TRADE_PCT > 0:
-        use = CAPITAL
-        try:
-            bal = client.futures_account_balance()
-            usdt = 0.0
-            for b in bal:
-                if b.get("asset") == "USDT":
-                    usdt = float(b.get("balance", 0))
-                    break
-            use = usdt * (RISK_PER_TRADE_PCT / 100.0)
-        except Exception:
-            use = CAPITAL
-    else:
-        use = CAPITAL
-
-    if CAPITAL_DYNAMIC:
-        use = use * (1.0 - clamp(CAPITAL_RESERVE_PCT, 0.0, 0.95))
-
-    notional = use * LEVERAGE
-    raw_qty = notional / max(price, 1e-9)
-    qty = round_step(raw_qty, STEP_SIZE)
-
-    if qty < MIN_QTY:
-        qty = MIN_QTY
-
+def calc_qty(cfg, price: float, step: float, min_qty: float):
+    capital = float(cfg.get("capital", 50))
+    leverage = int(cfg.get("leverage", 8))
+    notional = capital * leverage
+    qty = notional / max(1e-12, price)
+    qty = floor_to_step(qty, step)
+    if qty < min_qty:
+        return 0.0
     return qty
 
-def place_sl_tp(side: str, entry_price: float, qty: float):
-    a = atr(ATR_TF, ATR_PERIOD)
-    atr_dist = a * 0.6 if a > 0 else 0.0
-    pct_dist = entry_price * MIN_SL_DISTANCE_PCT
-    sl_dist = max(atr_dist, pct_dist)
+
+def place_protection_orders(client: Client, cfg: dict, symbol: str, side: str, entry_price: float, qty: float, tick: float):
+    """
+    Place:
+    - STOP_MARKET closePosition=True at sl_price (USD-based loss)
+    - optional TAKE_PROFIT ladder using LIMIT reduceOnly
+    """
+    sl_usd = float(cfg.get("sl_max_loss_usd", 1.5))
+    tp_min_usd = float(cfg.get("tp_min_profit_usd", 2.5))
+    min_sl_pct = float(cfg.get("min_sl_distance_pct", 0.006))
+
+    # Distances in price based on $/qty
+    sl_dist = sl_usd / max(1e-12, qty)
+    min_dist = entry_price * min_sl_pct
+    sl_dist = max(sl_dist, min_dist)
 
     if side == "LONG":
         sl_price = entry_price - sl_dist
-        sl_side = SIDE_SELL
-        tp_side = SIDE_SELL
+        sl_side = "SELL"
     else:
         sl_price = entry_price + sl_dist
-        sl_side = SIDE_BUY
-        tp_side = SIDE_BUY
+        sl_side = "BUY"
 
-    sl_price = round_tick(sl_price, TICK_SIZE)
+    sl_price = round_to_tick(sl_price, tick)
 
-    # SL protección (cierra toda la posición)
+    # Stop-loss protection (close entire position)
     client.futures_create_order(
-        symbol=SYMBOL,
+        symbol=symbol,
         side=sl_side,
         type="STOP_MARKET",
         stopPrice=sl_price,
         closePosition=True,
         workingType="MARK_PRICE",
     )
-    log.info(f"🟥 STOP LOSS {side} colocado | stop={sl_price}")
-    tg_send(f"🟥 STOP LOSS {side} colocado | stop={sl_price}")
 
-    ladder = list(TP_LADDER)
-    pcts = list(TP_LADDER_PCT)
+    # Minimal TP (if ladder not used, you could do TAKE_PROFIT_MARKET closePosition=True)
+    # We'll place ladder LIMITs (reduceOnly) based on cfg["tp_ladder"] and ["tp_ladder_pct"].
+    ladder = cfg.get("tp_ladder", [4.0, 7.0, 12.0])
+    ladder_pct = cfg.get("tp_ladder_pct", [0.3, 0.3, 0.4])
 
-    if ladder and ladder[0] < TP_MIN_PROFIT_USD:
-        ladder[0] = TP_MIN_PROFIT_USD
+    # Safety: ensure same length
+    n = min(len(ladder), len(ladder_pct))
+    if n <= 0:
+        return
 
-    if len(pcts) != len(ladder):
-        p = 1.0 / max(len(ladder), 1)
-        pcts = [p for _ in ladder]
+    remain_qty = qty
 
-    s = sum(pcts) if pcts else 1.0
-    pcts = [x / s for x in pcts]
+    for i in range(n):
+        target_usd = float(ladder[i])
+        pct = float(ladder_pct[i])
 
-    remaining = qty
-    for i, (tp_usd, pct) in enumerate(zip(ladder, pcts), start=1):
-        tp_qty = round_step(qty * pct, STEP_SIZE)
-        if i == len(ladder):
-            tp_qty = round_step(remaining, STEP_SIZE)
+        part_qty = qty * pct
+        part_qty = max(0.0, part_qty)
 
-        if tp_qty <= 0:
+        # keep qty sum safe
+        if i == n - 1:
+            part_qty = remain_qty
+        else:
+            remain_qty -= part_qty
+
+        # skip invalid
+        if part_qty <= 0:
             continue
 
-        if side == "LONG":
-            tp_price = entry_price + float(tp_usd)
-        else:
-            tp_price = entry_price - float(tp_usd)
+        dist = target_usd / max(1e-12, part_qty)
 
-        tp_price = round_tick(tp_price, TICK_SIZE)
+        if side == "LONG":
+            tp_price = entry_price + dist
+            tp_side = "SELL"
+        else:
+            tp_price = entry_price - dist
+            tp_side = "BUY"
+
+        tp_price = round_to_tick(tp_price, tick)
 
         client.futures_create_order(
-            symbol=SYMBOL,
+            symbol=symbol,
             side=tp_side,
-            type=ORDER_TYPE_LIMIT,
-            quantity=tp_qty,
+            type="LIMIT",
+            timeInForce="GTC",
             price=tp_price,
-            timeInForce=TIME_IN_FORCE_GTC,
-            reduceOnly=True
+            quantity=part_qty,
+            reduceOnly=True,
+            workingType="MARK_PRICE",
         )
 
-        remaining = max(0.0, remaining - tp_qty)
-
-        log.info(f"🎯 TP{i} {side} | +{tp_usd} USD | qty={tp_qty} | price={tp_price}")
-        tg_send(f"🎯 TP{i} {side} | +{tp_usd} USD | qty={tp_qty} | price={tp_price}")
-
-def open_market(side: str):
-    price = get_mark_price()
-    qty = round_step(qty_from_capital(price), STEP_SIZE)
-
-    if qty < MIN_QTY:
-        log.warning(f"Qty muy baja ({qty}). Revisa capital/leverage.")
-        return
-
-    cancel_all_open_orders()
-
-    if side == "LONG":
-        o_side = SIDE_BUY
-    else:
-        o_side = SIDE_SELL
-
-    log.info(f"🚀 ENTRY {side} | qty={qty}")
-    tg_send(f"🚀 ENTRY {side} | qty={qty}")
-
-    client.futures_create_order(
-        symbol=SYMBOL,
-        side=o_side,
-        type=ORDER_TYPE_MARKET,
-        quantity=qty
+    # Optional: notify
+    tg_send(
+        f"🛡️ SL colocado @ {sl_price}\n"
+        f"🎯 TP ladder colocado (min {tp_min_usd}$) | entry {entry_price} qty {qty}"
     )
 
-    time.sleep(0.6)
-    p = get_position()
-    if not p:
-        log.warning("No se detectó posición luego del entry.")
-        return
 
-    entry_price = float(p["entryPrice"])
-    pos_qty = abs(float(p["positionAmt"]))
+def enter_trade(client: Client, cfg: dict, symbol: str, side: str, step: float, min_qty: float, tick: float):
+    price = get_mark_price(client, symbol)
+    qty = calc_qty(cfg, price, step, min_qty)
+    if qty <= 0:
+        tg_send("⚠️ Qty calculada inválida (revisa capital/leverage/minQty).")
+        return False
 
-    place_sl_tp(side, entry_price, pos_qty)
+    order_side = "BUY" if side == "LONG" else "SELL"
 
+    # Entry MARKET
+    client.futures_create_order(
+        symbol=symbol,
+        side=order_side,
+        type="MARKET",
+        quantity=qty,
+    )
 
-# ============================================================
-# Señal: Order Flow simple
-# ============================================================
-def orderflow_signal():
-    limit = max(OF_LOOKBACK + 2, 10)
-    kl = get_klines(TREND_TF, limit=limit)
-    if len(kl) < OF_LOOKBACK + 2:
-        return None, {}
+    # After entry, get updated position entry price
+    time.sleep(0.5)
+    pos = get_position_info(client, symbol)
+    entry_price = float(pos["entry"]) if pos else price
 
-    prev = kl[-(OF_LOOKBACK+1):-1]
-    last = kl[-1]
+    STATE["last_entry"] = {"side": side, "price": entry_price, "qty": qty, "ts": int(time.time())}
+    save_state(STATE)
 
-    prev_vols = [float(k[5]) for k in prev]
-    avg_vol = sum(prev_vols) / max(len(prev_vols), 1)
+    tg_send(f"🚀 ENTRY {side} | qty={qty} | entry={entry_price}")
 
-    o, _, _, c, v, _, body_ratio = candle_stats(last)
+    # Place SL/TP protection
+    place_protection_orders(client, cfg, symbol, side, entry_price, qty, tick)
 
-    vol_ok = v >= avg_vol * OF_VOLUME_MULT
-    body_ok = body_ratio >= OF_BODY_RATIO
-
-    side = None
-    if vol_ok and body_ok:
-        if c > o:
-            side = "LONG"
-        elif c < o:
-            side = "SHORT"
-
-    debug = {
-        "avg_vol": avg_vol,
-        "last_vol": v,
-        "body_ratio": body_ratio,
-        "vol_ok": vol_ok,
-        "body_ok": body_ok,
-        "tf": TREND_TF
-    }
-    return side, debug
+    return True
 
 
-# ============================================================
-# Loop control
-# ============================================================
-_last_heartbeat = 0
-_last_vol_filter_msg = 0
-_cooldown_until = 0
+# =========================
+# Main
+# =========================
+def main():
+    cfg = load_config()
+    symbol = cfg["symbol"]
+    tf = cfg.get("trend_timeframe", "1m")
+    poll_sec = float(cfg.get("poll_sec", 1))
+    kl_limit = int(cfg.get("data_klines_limit", 30))
 
-def heartbeat():
-    global _last_heartbeat
-    if TG_HEARTBEAT_MIN <= 0:
-        return
-    now = now_utc_ts()
-    if now - _last_heartbeat >= TG_HEARTBEAT_MIN * 60:
-        _last_heartbeat = now
-        tg_send("▶️ Bot ORDER FLOW activo (heartbeat)")
-        log.info("▶️ Heartbeat enviado")
+    cooldown_after_sl_sec = int(cfg.get("cooldown_after_sl_sec", 180))
+    vol_block_notify_sec = int(cfg.get("vol_block_notify_sec", 600))
 
-def set_cooldown(seconds: int, reason: str):
-    global _cooldown_until
-    _cooldown_until = now_utc_ts() + max(0, seconds)
-    msg = f"⏸️ Cooldown activado ({seconds}s) | {reason}"
-    log.info(msg)
-    tg_send(msg)
+    if not BINANCE_KEY or not BINANCE_SECRET:
+        raise RuntimeError("Faltan credenciales de Binance (BINANCE_KEY/BINANCE_SECRET)")
 
-def in_cooldown() -> bool:
-    return now_utc_ts() < _cooldown_until
+    client = Client(BINANCE_KEY, BINANCE_SECRET, testnet=bool(cfg.get("testnet", False)))
 
-
-def main_loop():
-    global _last_vol_filter_msg
-
+    # Basic init (leverage & margin type)
+    set_leverage_and_margin(client, symbol, int(cfg.get("leverage", 8)), cfg.get("margin_type", "ISOLATED"))
+    tg_send(f"✅ Conectado a Binance correctamente | {symbol} | {now_utc()}")
     tg_send("▶️ Bot ORDER FLOW iniciado")
-    log.info("▶️ Bot ORDER FLOW iniciado")
+
+    step, min_qty, tick = get_symbol_filters(client, symbol)
 
     while True:
         try:
-            heartbeat()
+            # Telegram commands each loop
+            tg_poll_commands(client, cfg)
 
-            if in_cooldown():
-                time.sleep(1)
+            # cooldown check
+            now = int(time.time())
+            cd_until = int(STATE.get("cooldown_until", 0))
+            if now < cd_until:
+                time.sleep(min(poll_sec, 2))
                 continue
 
-            pos = get_position()
-            if pos:
-                time.sleep(POLL_SEC)
+            # If paused: do NOT open new entries, but keep loop alive
+            if STATE.get("paused", False):
+                time.sleep(min(poll_sec, 2))
                 continue
 
-            ok_vol, avgR, lastR = volatility_expansion_ok(
-                tf=TREND_TF,
-                lookback=VOL_FILTER_LOOKBACK,
-                mult=VOL_FILTER_MULT
-            )
+            # If there is a position open: do nothing here (SL/TP handled by exchange)
+            pos = get_position_info(client, symbol)
+            if pos and abs(pos["amt"]) > 0:
+                time.sleep(poll_sec)
+                continue
+
+            # No open position -> evaluate signal
+            kl = get_klines(client, symbol, tf, kl_limit)
+
+            ok_vol, avgR, lastR = check_volume_expansion(cfg, kl)
             if not ok_vol:
-                now = now_utc_ts()
-                if now - _last_vol_filter_msg >= 60:
-                    _last_vol_filter_msg = now
-                    msg = f"⛔ Vol filter: sin expansión | avgR={avgR:.4f} lastR={lastR:.4f}"
-                    log.info(msg)
-                    tg_send(msg)
-                time.sleep(POLL_SEC)
+                # notify throttled
+                last_n = int(STATE.get("last_vol_block_notify", 0))
+                if now - last_n >= vol_block_notify_sec:
+                    tg_send(f"⛔ Vol filter: sin expansión | avgR={avgR:.4f} lastR={lastR:.4f}")
+                    STATE["last_vol_block_notify"] = now
+                    save_state(STATE)
+                time.sleep(poll_sec)
                 continue
 
-            side, dbg = orderflow_signal()
-            if side:
-                log.info(
-                    f"✅ Señal {side} | vol={dbg.get('last_vol', 0):.2f} "
-                    f"avg={dbg.get('avg_vol', 0):.2f} bodyR={dbg.get('body_ratio', 0):.2f} tf={dbg.get('tf')}"
-                )
-                open_market(side)
+            side = signal_orderflow(cfg, kl)
+            if not side:
+                time.sleep(poll_sec)
+                continue
 
-            time.sleep(POLL_SEC)
+            # Enter trade
+            entered = enter_trade(client, cfg, symbol, side, step, min_qty, tick)
+            if not entered:
+                time.sleep(poll_sec)
+                continue
 
-        except KeyboardInterrupt:
-            log.info("SIGINT/KeyboardInterrupt recibido, cerrando limpio.")
-            tg_send("🛑 Bot detenido (SIGINT).")
-            sys.exit(0)
+            time.sleep(poll_sec)
 
         except BinanceAPIException as e:
-            if getattr(e, "code", None) == -4046 or "-4046" in str(e):
-                log.info("✅ Binance -4046 (no-op) ignorado")
-                time.sleep(1)
-                continue
+            # Binance error -> notify (throttle)
+            now = int(time.time())
+            last_err = int(STATE.get("last_error_notify", 0))
+            if now - last_err > 15:
+                tg_send(f"❌ BinanceAPIException: {getattr(e, 'message', str(e))}")
+                STATE["last_error_notify"] = now
+                save_state(STATE)
+            time.sleep(2)
 
-            log.error(f"❌ BinanceAPIException: {e}")
-            tg_send(f"❌ Binance API error: {e}")
-            set_cooldown(10, "Binance API error")
-            time.sleep(1)
+        except Exception as ex:
+            # Generic error -> notify (throttle) and apply small cooldown
+            now = int(time.time())
+            last_err = int(STATE.get("last_error_notify", 0))
+            if now - last_err > 15:
+                tg_send(f"❌ Error loop: {ex}")
+                STATE["last_error_notify"] = now
+                save_state(STATE)
 
-        except Exception as e:
-            log.error("❌ Error inesperado en loop")
-            traceback.print_exc()
-            tg_send(f"❌ Error loop: {e}")
-            set_cooldown(10, "Error inesperado")
-            time.sleep(1)
-
-
-# ============================================================
-# Entrypoint
-# ============================================================
-def main():
-    def _handle_sigterm(signum, frame):
-        log.info("SIGTERM recibido, cerrando limpio.")
-        tg_send("🛑 Bot detenido (SIGTERM).")
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-
-    setup_futures()
-    main_loop()
+            # small cooldown to prevent spam loops
+            STATE["cooldown_until"] = int(time.time()) + 10
+            save_state(STATE)
+            time.sleep(2)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        log.info("KeyboardInterrupt global, cierre limpio.")
-        sys.exit(0)
-    except Exception as e:
-        log.critical("❌ ERROR FATAL DEL BOT")
-        log.critical(str(e))
-        traceback.print_exc()
-        tg_send(f"❌ ERROR FATAL: {e}")
-        sys.exit(1)
+    main()

@@ -1,1 +1,5 @@
-.DS_Store
+bot_state.json
+*.db
+.env
+__pycache__/
+*.pyc
