@@ -1,288 +1,198 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+import os
+import json
+import time
+import math
+import logging
+import traceback
+import sys
+from datetime import datetime
 
-"""
-BOT BINANCE FUTURES – ORDER FLOW PROXY (TERMUX SAFE)
-Incluye:
-- Entrada por agresión real (orderflow proxy)
-- Filtro de volatilidad (anti-chop)
-- TP / SL monetarios
-- Cooldown post-SL
-- Sin pandas
-"""
-
-import os, json, time, math, requests
 from binance.client import Client
+from binance.enums import *
+from binance.exceptions import BinanceAPIException
 
-CFG_PATH = "config_binance.json"
-CFG = {}
+# ---------------------------------------------------------------------
+# LOGGING (CRÍTICO PARA FLY.IO)
+# ---------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
-BINANCE_KEY = os.getenv("BINANCE_KEY") or os.getenv("BINANCE_API_KEY")
-BINANCE_SECRET = os.getenv("BINANCE_SECRET_KEY") or os.getenv("BINANCE_API_SECRET")
-TG_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+# ---------------------------------------------------------------------
+# CARGA CONFIG
+# ---------------------------------------------------------------------
+CONFIG_PATH = os.getenv("CONFIG_PATH", "config_binance.json")
+
+if not os.path.exists(CONFIG_PATH):
+    raise RuntimeError(f"No existe {CONFIG_PATH}")
+
+with open(CONFIG_PATH, "r") as f:
+    CFG = json.load(f)
+
+SYMBOL = CFG["symbol"]
+LEVERAGE = CFG["leverage"]
+CAPITAL = CFG["capital"]
+TP_LADDER = CFG["tp_ladder"]
+TP_LADDER_PCT = CFG["tp_ladder_pct"]
+MIN_SL_PCT = CFG["min_sl_distance_pct"]
+POLL_SEC = CFG.get("poll_sec", 1)
+
+# ---------------------------------------------------------------------
+# CREDENCIALES BINANCE (DESDE ENV)
+# ---------------------------------------------------------------------
+BINANCE_KEY = os.getenv("BINANCE_KEY")
+BINANCE_SECRET = os.getenv("BINANCE_SECRET")
 
 if not BINANCE_KEY or not BINANCE_SECRET:
-    raise RuntimeError("Faltan credenciales de Binance")
+    raise RuntimeError("Faltan credenciales de Binance (BINANCE_KEY / BINANCE_SECRET)")
 
+# ---------------------------------------------------------------------
+# CLIENTE BINANCE
+# ---------------------------------------------------------------------
 client = Client(BINANCE_KEY, BINANCE_SECRET)
 
-state = {
-    "last_signal": None,
-    "shutdown": False,
-    "cooldown_until": 0,
-    "last_vol_block_ts": 0
-}
+# Ping explícito (para ver errores de región / restricción)
+client.ping()
+logging.info("Conectado a Binance correctamente")
 
-# -------------------------
-# Telegram
-# -------------------------
-def tg(msg):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print(msg)
-        return
+# ---------------------------------------------------------------------
+# SETUP FUTURES
+# ---------------------------------------------------------------------
+client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+client.futures_change_margin_type(symbol=SYMBOL, marginType="ISOLATED")
+
+# ---------------------------------------------------------------------
+# UTILIDADES
+# ---------------------------------------------------------------------
+def get_price():
+    return float(client.futures_mark_price(symbol=SYMBOL)["markPrice"])
+
+def get_position():
+    positions = client.futures_position_information(symbol=SYMBOL)
+    for p in positions:
+        if abs(float(p["positionAmt"])) > 0:
+            return p
+    return None
+
+def cancel_all_orders():
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data={"chat_id": TG_CHAT_ID, "text": msg},
-            timeout=10
-        )
-    except:
+        client.futures_cancel_all_open_orders(symbol=SYMBOL)
+    except Exception:
         pass
 
-# -------------------------
-# Market utils
-# -------------------------
-def mark_price(sym):
-    return float(client.futures_mark_price(symbol=sym)["markPrice"])
-
-def get_step(sym):
-    info = client.futures_exchange_info()
-    for s in info["symbols"]:
-        if s["symbol"] == sym:
-            for f in s["filters"]:
-                if f["filterType"] == "LOT_SIZE":
-                    return float(f["stepSize"])
-    return 0.001
-
-def round_qty(qty, step):
-    return math.floor(qty / step) * step
-
-# -------------------------
-# Data
-# -------------------------
-def fetch_1m(symbol, limit=30):
-    kl = client.futures_klines(
-        symbol=symbol,
-        interval=Client.KLINE_INTERVAL_1MINUTE,
-        limit=limit
-    )
-    candles = []
-    for k in kl:
-        candles.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-            "taker_buy": float(k[9])
-        })
-    return candles
-
-# -------------------------
-# Orderflow proxy
-# -------------------------
-def orderflow_signal(candles, lookback, vol_mult, body_ratio):
-    if len(candles) < lookback + 2:
-        return None
-
-    recent = candles[-(lookback+1):-1]  # velas cerradas
-    last = recent[-1]
-
-    avg_vol = sum(c["volume"] for c in recent) / len(recent)
-    if last["volume"] < avg_vol * vol_mult:
-        return None
-
-    buy = sum(c["taker_buy"] for c in recent)
-    sell = sum(c["volume"] for c in recent) - buy
-    delta = buy - sell
-
-    rng = last["high"] - last["low"]
-    if rng <= 0:
-        return None
-
-    body = abs(last["close"] - last["open"])
-    body_strength = body / rng
-
-    if delta > 0 and last["close"] > last["open"] and body_strength >= body_ratio:
-        return "LONG"
-
-    if delta < 0 and last["close"] < last["open"] and body_strength >= body_ratio:
-        return "SHORT"
-
-    return None
-
-# -------------------------
-# Volatility filter (anti-chop)
-# -------------------------
-def passes_volatility_filter(candles, lookback, range_mult, min_avg_range_pct, price):
+# ---------------------------------------------------------------------
+# ENTRY DE PRUEBA (NEUTRO)
+# ---------------------------------------------------------------------
+def should_enter():
     """
-    - avg_range: promedio (high-low) de últimas lookback velas cerradas
-    - last_range: rango de última vela cerrada
-    Reglas:
-      1) avg_range >= price * min_avg_range_pct
-      2) last_range >= avg_range * range_mult
+    Placeholder de señal.
+    Devuelve 'LONG', 'SHORT' o None
     """
-    if len(candles) < lookback + 3:
-        return False, 0.0, 0.0
+    return None  # <-- aquí conectas tu lógica real
 
-    recent = candles[-(lookback+1):-1]  # velas cerradas
-    ranges = [(c["high"] - c["low"]) for c in recent]
-    avg_range = sum(ranges) / len(ranges)
-    last_range = ranges[-1]
+# ---------------------------------------------------------------------
+# EXECUCIÓN DE ORDEN
+# ---------------------------------------------------------------------
+def open_position(side):
+    price = get_price()
+    qty = round((CAPITAL * LEVERAGE) / price, 3)
 
-    if avg_range <= 0 or last_range <= 0:
-        return False, avg_range, last_range
+    logging.info(f"ENTRY {side} | qty {qty}")
 
-    # piso mínimo de volatilidad (evita mercado muerto)
-    if avg_range < price * min_avg_range_pct:
-        return False, avg_range, last_range
-
-    # expansión (evita chop)
-    if last_range < avg_range * range_mult:
-        return False, avg_range, last_range
-
-    return True, avg_range, last_range
-
-# -------------------------
-# Position / PnL
-# -------------------------
-def get_position(symbol):
-    pos = client.futures_position_information(symbol=symbol)
-    for p in pos:
-        amt = float(p["positionAmt"])
-        if abs(amt) > 0:
-            return {
-                "amt": amt,
-                "side": "LONG" if amt > 0 else "SHORT",
-                "pnl": float(p["unRealizedProfit"])
-            }
-    return None
-
-def close_position(symbol, side, qty):
-    client.futures_create_order(
-        symbol=symbol,
-        side="SELL" if side == "LONG" else "BUY",
-        type="MARKET",
-        quantity=abs(qty),
-        reduceOnly=True
-    )
-
-# -------------------------
-# Entry
-# -------------------------
-def enter_market(symbol, side):
-    px = mark_price(symbol)
-    step = get_step(symbol)
-
-    capital = float(CFG["capital"])
-    leverage = int(CFG["leverage"])
-
-    qty = round_qty((capital * leverage) / px, step)
-    if qty <= 0:
-        return
-
-    client.futures_create_order(
-        symbol=symbol,
-        side="BUY" if side == "LONG" else "SELL",
-        type="MARKET",
+    order = client.futures_create_order(
+        symbol=SYMBOL,
+        side=SIDE_BUY if side == "LONG" else SIDE_SELL,
+        type=ORDER_TYPE_MARKET,
         quantity=qty
     )
-    tg(f"🚀 ENTRY {side} | qty {qty}")
 
-# -------------------------
-# Main loop
-# -------------------------
+    time.sleep(0.5)
+    place_sl_tp(side)
+
+# ---------------------------------------------------------------------
+# STOP LOSS + TAKE PROFITS
+# ---------------------------------------------------------------------
+def place_sl_tp(side):
+    pos = get_position()
+    if not pos:
+        return
+
+    entry_price = float(pos["entryPrice"])
+    qty = abs(float(pos["positionAmt"]))
+
+    if side == "LONG":
+        sl_price = entry_price * (1 - MIN_SL_PCT)
+    else:
+        sl_price = entry_price * (1 + MIN_SL_PCT)
+
+    client.futures_create_order(
+        symbol=SYMBOL,
+        side=SIDE_SELL if side == "LONG" else SIDE_BUY,
+        type=ORDER_TYPE_STOP_MARKET,
+        stopPrice=round(sl_price, 4),
+        closePosition=True
+    )
+
+    logging.info(f"SL colocado en {round(sl_price,4)}")
+
+    # Take Profits escalonados
+    for tp, pct in zip(TP_LADDER, TP_LADDER_PCT):
+        tp_qty = round(qty * pct, 3)
+
+        if side == "LONG":
+            tp_price = entry_price + tp
+            tp_side = SIDE_SELL
+        else:
+            tp_price = entry_price - tp
+            tp_side = SIDE_BUY
+
+        client.futures_create_order(
+            symbol=SYMBOL,
+            side=tp_side,
+            type=ORDER_TYPE_LIMIT,
+            quantity=tp_qty,
+            price=round(tp_price, 4),
+            timeInForce=TIME_IN_FORCE_GTC,
+            reduceOnly=True
+        )
+
+        logging.info(f"TP {tp} USD | qty {tp_qty}")
+
+# ---------------------------------------------------------------------
+# MAIN LOOP
+# ---------------------------------------------------------------------
 def main():
-    global CFG
-    with open(CFG_PATH) as f:
-        CFG = json.load(f)
+    logging.info("Bot iniciado")
 
-    tg("▶️ Bot ORDER FLOW iniciado")
-
-    while not state["shutdown"]:
+    while True:
         try:
-            now = time.time()
+            pos = get_position()
 
-            # Cooldown post-SL
-            if state["cooldown_until"] > now:
-                time.sleep(1)
-                continue
+            if not pos:
+                signal = should_enter()
+                if signal:
+                    open_position(signal)
 
-            # Gestión TP/SL
-            pos = get_position(CFG["symbol"])
-            if pos:
-                pnl = pos["pnl"]
+            time.sleep(POLL_SEC)
 
-                if pnl >= float(CFG["tp_min_profit_usd"]):
-                    tg(f"🎯 TAKE PROFIT {pos['side']} | PnL {pnl:.2f}")
-                    close_position(CFG["symbol"], pos["side"], pos["amt"])
-                    time.sleep(3)
-                    continue
-
-                if pnl <= -float(CFG["sl_max_loss_usd"]):
-                    tg(f"🟥 STOP LOSS {pos['side']} | PnL {pnl:.2f}")
-                    close_position(CFG["symbol"], pos["side"], pos["amt"])
-
-                    cooldown = int(CFG.get("cooldown_after_sl_sec", 180))
-                    state["cooldown_until"] = time.time() + cooldown
-                    tg(f"⏸️ Cooldown post-SL activado ({cooldown}s)")
-
-                    time.sleep(3)
-                    continue
-
-                time.sleep(1)
-                continue
-
-            # --- Buscar entrada ---
-            candles = fetch_1m(CFG["symbol"], limit=int(CFG.get("data_klines_limit", 30)))
-            price = candles[-2]["close"] if len(candles) >= 2 else mark_price(CFG["symbol"])
-
-            # Filtro de volatilidad (anti-chop)
-            vol_ok, avg_r, last_r = passes_volatility_filter(
-                candles,
-                lookback=int(CFG.get("vol_lookback", 14)),
-                range_mult=float(CFG.get("vol_range_mult", 1.15)),
-                min_avg_range_pct=float(CFG.get("min_avg_range_pct", 0.0012)),
-                price=price
-            )
-
-            if not vol_ok:
-                # Mensaje cada X segundos para no spamear
-                notify_every = int(CFG.get("vol_block_notify_sec", 600))
-                if now - state["last_vol_block_ts"] >= notify_every:
-                    tg(f"⛔ Vol filter: sin expansión | avgR={avg_r:.4f} lastR={last_r:.4f}")
-                    state["last_vol_block_ts"] = now
-                time.sleep(1)
-                continue
-
-            # Señal orderflow
-            signal = orderflow_signal(
-                candles,
-                int(CFG["of_lookback"]),
-                float(CFG["of_volume_mult"]),
-                float(CFG["of_body_ratio"])
-            )
-
-            if signal and signal != state["last_signal"]:
-                enter_market(CFG["symbol"], signal)
-                state["last_signal"] = signal
-
-            time.sleep(int(CFG.get("poll_sec", 1)))
-
-        except Exception as e:
-            print("Loop error:", e)
+        except BinanceAPIException as e:
+            logging.error(f"Binance API error: {e}")
             time.sleep(5)
 
+        except Exception as e:
+            logging.error("Error inesperado")
+            traceback.print_exc()
+            time.sleep(5)
+
+# ---------------------------------------------------------------------
+# ENTRYPOINT
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logging.critical("ERROR FATAL DEL BOT")
+        logging.critical(str(e))
+        traceback.print_exc()
+        sys.exit(1)
