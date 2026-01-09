@@ -1,3 +1,16 @@
+## USO DEL BOT DE TELEGRAM
+Importante: cómo usarlo desde Telegram
+
+/pause → no abre nuevas operaciones
+
+/resume → vuelve a abrir
+
+/status → te dice si está pausado + posición
+
+/close → pide confirmación
+
+/close yes → cierra a MARKET (reduceOnly)
+
 ## INSTALACION
 
 1) CLONAR EL REPOSITORIO
